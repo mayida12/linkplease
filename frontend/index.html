@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>LinkPlease Dashboard</title>
+<style>
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 22px; }
+  .stats { display: flex; gap: 12px; margin: 20px 0; }
+  .stat-box { flex: 1; border: 1px solid #ddd; border-radius: 8px; padding: 12px; text-align: center; }
+  .stat-box .value { font-size: 28px; font-weight: bold; }
+  .stat-box .label { font-size: 12px; color: #666; text-transform: uppercase; }
+  form { display: flex; gap: 8px; margin: 16px 0; }
+  input { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+  button { padding: 8px 16px; border: none; background: #222; color: white; border-radius: 4px; cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: 14px; }
+  .error { color: #b00020; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<!-- No build step: React + Babel loaded straight from a CDN so this file
+     can just be opened in a browser (or served statically) with nothing
+     to npm install. Fine for a small internal dashboard; a real product
+     would use a proper Vite/CRA build. -->
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+// Change this if your backend runs somewhere other than localhost:8000.
+const API_BASE_URL = window.LINKPLEASE_API_BASE_URL || "http://localhost:8000";
+
+function StatBox({ label, value }) {
+  return (
+    <div className="stat-box">
+      <div className="value">{value}</div>
+      <div className="label">{label}</div>
+    </div>
+  );
+}
+
+function App() {
+  const [stats, setStats] = useState({ sent: 0, failed: 0, queued: 0, duplicates_blocked: 0 });
+  const [rules, setRules] = useState([]);
+  const [keyword, setKeyword] = useState("");
+  const [dmMessage, setDmMessage] = useState("");
+  const [error, setError] = useState(null);
+
+  async function loadStats() {
+    try {
+      const res = await fetch(`${API_BASE_URL}/stats`);
+      if (!res.ok) throw new Error(`stats request failed: ${res.status}`);
+      setStats(await res.json());
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  async function loadRules() {
+    try {
+      const res = await fetch(`${API_BASE_URL}/rules`);
+      if (!res.ok) throw new Error(`rules request failed: ${res.status}`);
+      setRules(await res.json());
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  useEffect(() => {
+    loadStats();
+    loadRules();
+    const interval = setInterval(loadStats, 5000); // poll stats every 5s
+    return () => clearInterval(interval);
+  }, []);
+
+  async function createRule(e) {
+    e.preventDefault();
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/rules`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keyword, dm_message: dmMessage }),
+      });
+      if (!res.ok) throw new Error(`create rule failed: ${res.status}`);
+      setKeyword("");
+      setDmMessage("");
+      loadRules();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  return (
+    <div>
+      <h1>LinkPlease - Instagram Automation</h1>
+      {error && <p className="error">{error}</p>}
+
+      <div className="stats">
+        <StatBox label="Sent" value={stats.sent} />
+        <StatBox label="Failed" value={stats.failed} />
+        <StatBox label="Queued" value={stats.queued} />
+        <StatBox label="Duplicates blocked" value={stats.duplicates_blocked} />
+      </div>
+
+      <h2>Create a rule</h2>
+      <form onSubmit={createRule}>
+        <input
+          placeholder="keyword (e.g. PRICE)"
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          required
+        />
+        <input
+          placeholder="DM message"
+          value={dmMessage}
+          onChange={(e) => setDmMessage(e.target.value)}
+          required
+        />
+        <button type="submit">Create</button>
+      </form>
+
+      <h2>Existing rules</h2>
+      <table>
+        <thead>
+          <tr><th>Keyword</th><th>DM message</th></tr>
+        </thead>
+        <tbody>
+          {rules.map((r) => (
+            <tr key={r.rule_id}>
+              <td>{r.keyword}</td>
+              <td>{r.dm_message}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+</body>
+</html>
