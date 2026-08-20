@@ -1,51 +1,53 @@
 # FAILURES.md
 
-This is an honest list of known ways the system can still lose a DM, send a duplicate, or report an inaccurate number. These are deliberate tradeoffs for the scope of this assignment.
+This is an honest list of known limitations and failure scenarios in the current implementation.
 
-## 1. Crash after the mock API accepts a DM but before the database commit
+## 1. Crash after the DM is accepted but before the database is updated
 
-The worker sends the DM to the mock API and then persists the returned `dm_id` and job status in Postgres. If the worker crashes after the API accepts the request but before our database transaction commits, the database may still show the job as `pending`.
+If the worker crashes after the mock API accepts a DM but before the returned `dm_id` and status are committed to PostgreSQL, the job may still appear as `pending`.
 
-After restart, the worker can retry the job. Because the original API call may already have succeeded, this creates a narrow possibility of sending the same logical DM twice.
+After restart, the worker can retry it, which creates a small possibility of sending the same DM twice.
 
-A true solution would require stronger coordination between the database and external API, or a durable "send in progress / outcome unknown" state followed by reconciliation.
+A production solution would require stronger idempotency support from the external API or a durable reconciliation mechanism for uncertain requests.
 
-## 2. The send operation has an unavoidable external-API race window
+## 2. External API request can fail in an unknown state
 
-The database transaction cannot atomically include the external HTTP request. If the process dies while the HTTP request is in flight, we cannot know from our database alone whether the mock API received the request.
+The database transaction and external HTTP request cannot be atomic.
 
-We deliberately prefer retrying an uncertain job over silently losing a DM, but this means an extremely narrow duplicate-send window remains.
+If the process crashes while a request is in flight, the system cannot know whether the mock API received it. Retrying protects against losing the DM but leaves a narrow duplicate-send possibility.
 
-## 3. The rate limiter is safe for the documented single-worker deployment, but not fully atomic across multiple workers
+## 3. Rate limiting assumes a single worker
 
-The rate limiter counts recent send attempts in Postgres before allowing another send.
+The rate limiter stores send attempts in PostgreSQL and correctly enforces the 10 requests / 60 seconds limit with the intended single-worker deployment.
 
-With one worker process, sends happen sequentially and the 10-requests-per-60-seconds limit is respected.
+If multiple workers send concurrently, two workers could check the limit at the same time and both see an available slot.
 
-If multiple worker processes were allowed to send concurrently, two workers could theoretically check the limit at the same time and both observe an available slot. A production multi-worker implementation would use a database lock or another atomic rate-limiting mechanism around the check-and-record operation.
+A production implementation would use an atomic database lock or distributed rate limiter.
 
-## 4. Reconciliation can leave a DM queued if status checks remain unavailable
+## 4. Delivery confirmation can remain pending
 
-After a successful send response, the job enters `sent_pending_confirmation` and the worker checks the mock API for the final delivery status.
+A `202` response means the mock API accepted the DM but does not guarantee delivery.
 
-If the mock API's status endpoint remains unavailable for an extended period, the job can remain unconfirmed indefinitely. We intentionally do not resend merely because a status check failed, because doing so could create a duplicate DM.
+The job therefore enters `sent_pending_confirmation` and is reconciled through the mock API. If the status endpoint remains unavailable, the job can remain unconfirmed.
 
-A production system would add monitoring and a separate policy for jobs that remain unconfirmed for too long.
+The system intentionally does not resend in this situation because doing so could create a duplicate DM.
 
-## 5. Comment deletion only cancels jobs that are still pending
+## 5. Deleted comments cannot cancel an already-sent DM
 
-If a `comment.deleted` event arrives while its DM job is still pending, the job is cancelled.
+A `comment.deleted` event cancels the DM only while the job is still `pending`.
 
-If the DM has already been sent or is being reconciled, we leave it alone. Once an external DM has been sent, attempting to undo it is not possible through the provided mock API.
+Once the DM has been sent or is being reconciled, it is left unchanged because the provided API does not support safely undoing an already-sent DM.
 
 ## 6. `/stats` is a live database snapshot
 
-`/stats` is calculated from the current database state. During a high-volume load test, the numbers can change between requests while workers are processing events, sending DMs, retrying failures, and reconciling delivery statuses.
+`/stats` reflects the current database state.
 
-Therefore, intermediate `/stats` responses during an active load test should not be treated as the final result. The stable numbers after the queue has drained are the meaningful comparison point.
+During active processing, values can temporarily change as jobs move between `pending`, `sent_pending_confirmation`, `delivered`, and `failed`.
 
-## 7. The implementation is intentionally optimized for the assignment's single-worker deployment
+The final numbers should therefore be compared after the queue has finished processing.
 
-The worker uses Postgres as the durable source of truth for webhook events, deduplication, jobs, retries, and delivery attempts. Restarting the worker does not lose pending database-backed work.
+## 7. Single-worker architecture
 
-For a production system at much larger scale, I would separate webhook ingestion, job processing, rate limiting, and reconciliation into independently scalable components and add stronger observability, alerting, and distributed coordination.
+The current implementation intentionally uses one worker process with PostgreSQL as the durable source of truth.
+
+For production-scale traffic, I would separate ingestion, job processing, rate limiting, and reconciliation into independently scalable workers and add distributed coordination, monitoring, and alerting.
